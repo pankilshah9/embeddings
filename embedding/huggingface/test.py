@@ -1,10 +1,18 @@
 from typing import List
 
-def generate_embeddings(data: List[str]):
-    from component import EmbeddingService
+from embedding.embedding import EmbeddingRequestItem, EmbeddingsRequest
 
-    embedding_service = EmbeddingService()
-    return embedding_service.create_embeddings_list(data).embeddings
+
+def generate_embeddings(content: List[str]):
+    from embedding.embedding import AbstractEmbeddingService
+
+    data: List["EmbeddingRequestItem"] = []
+
+    for item in content:
+        data.append(EmbeddingRequestItem(content=item))
+
+    return AbstractEmbeddingService.generate_embeddings("huggingface", EmbeddingsRequest(data=data)).embeddings
+
 
 # Example test case
 print(generate_embeddings(["AI", "Artificial Intelligence", "Machine Learning"]))
