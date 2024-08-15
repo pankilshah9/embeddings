@@ -1,14 +1,17 @@
 from typing import List
 
-def generate_embeddings(data: List[str]):
-    from component import EmbeddingService
+from embedding.embedding import EmbeddingRequestItem, EmbeddingsRequest
 
-    embedding_service = EmbeddingService()
-    return embedding_service.create_embeddings_list(data).embeddings
 
-if __name__ == "__main__":
-    # Example test case
-    example_texts = ["AI and machine learning", "AWS Bedrock embeddings"]
-    embeddings = generate_embeddings(example_texts)
-    for embedding in embeddings:
-        print(f"Text: {embedding.text}, Embedding: {embedding.embedding[:10]}...")  # Print first 10 dimensions for brevity
+def generate_embeddings(content: List[str]):
+    from embedding.embedding import AbstractEmbeddingService
+
+    data: List["EmbeddingRequestItem"] = []
+
+    for item in content:
+        data.append(EmbeddingRequestItem(content=item))
+
+    return AbstractEmbeddingService.generate_embeddings("bedrock", EmbeddingsRequest(data=data)).embeddings
+
+
+print(generate_embeddings(["Price of Maruti Suzuki India (MARUTI): ₹8901.23", "Price of"]))

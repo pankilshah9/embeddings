@@ -1,117 +1,89 @@
 import os
 import json
-from typing import List, Optional, Dict, Any
-import numpy as np
-from botocore.exceptions import NoCredentialsError, PartialCredentialsError
 import boto3
+import numpy as np
+from loguru import logger
+from typing import List, Dict, Any
+from botocore.exceptions import NoCredentialsError, PartialCredentialsError
+from config import MODEL, REGION_NAME, CREDENTIALS_PROFILE_NAME, ENDPOINT_URL, NORMALIZE, SUPPORTED_MODELS, \
+    api_config_schema
+from embedding.embedding import EmbeddingsResponse, EmbeddingItem, AbstractEmbeddingService, EmbeddingsRequest
+from utils.json_utils import validate_or_get_default_json
 
-from config import MODEL, REGION_NAME, CREDENTIALS_PROFILE_NAME, ENDPOINT_URL, NORMALIZE, SUPPORTED_MODELS
-from embedding.embedding import EmbeddingsResponse, EmbeddingItem
 
+class EmbeddingService(AbstractEmbeddingService):
 
-class EmbeddingService:
-    """
-    EmbeddingService is a class for creating text embeddings using AWS Bedrock embedding models.
+    def __init__(self, settings: Dict[str, Any] = None):
+        super().__init__(settings)
 
-    Supported Models:
-    - amazon.titan-embed-text-v1
-    """
+        settings = validate_or_get_default_json(api_config_schema(), settings)
 
-    def __init__(self, model_id: str = MODEL, region_name: Optional[str] = REGION_NAME,
-                 credentials_profile_name: Optional[str] = CREDENTIALS_PROFILE_NAME,
-                 endpoint_url: Optional[str] = ENDPOINT_URL, normalize: bool = NORMALIZE):
-        """
-        Initializes the EmbeddingService with the provided configuration settings.
+        self.model = settings.get("model")
+        self.region_name = settings.get("region_name", REGION_NAME)
+        self.credentials_profile_name = settings.get("credentials_profile_name", CREDENTIALS_PROFILE_NAME)
+        self.endpoint_url = settings.get("endpoint_url", ENDPOINT_URL)
+        self.normalize = settings.get("normalize", NORMALIZE)
+        self.client = self._create_client()
 
-        :param model_id: Model to be used for creating embeddings.
-        :param region_name: AWS region name.
-        :param credentials_profile_name: Profile name in the AWS credentials/config file.
-        :param endpoint_url: Endpoint URL for the Bedrock service.
-        :param normalize: Whether to normalize the embeddings to unit vectors.
-        """
-        if model_id not in SUPPORTED_MODELS:
-            raise ValueError(f"Model '{model_id}' is not supported. Supported models are: {', '.join(SUPPORTED_MODELS)}")
+    def _create_client(self):
+        """Create a client to connect to Bedrock"""
+        try:
+            session = boto3.Session(profile_name=self.credentials_profile_name)
+            client_params = {"region_name": self.region_name}
+            if self.endpoint_url:
+                client_params["endpoint_url"] = self.endpoint_url
 
-        self.model_id = model_id
-        self.region_name = region_name
-        self.credentials_profile_name = credentials_profile_name
-        self.endpoint_url = endpoint_url
-        self.normalize = normalize
+            return session.client('bedrock-runtime', **client_params)
+        except (NoCredentialsError, PartialCredentialsError):
+            logger.error(f"Could not load credentials to authenticate with AWS client.")
+            raise
+        except Exception:
+            logger.error(f"Could not connect to Bedrock")
+            raise
 
-        session = boto3.Session(profile_name=self.credentials_profile_name)
-        client_params = {"region_name": self.region_name}
-        if self.endpoint_url:
-            client_params["endpoint_url"] = self.endpoint_url
-
-        self.client = session.client('bedrock-runtime', **client_params)
-
-    def _embedding_func(self, text: str) -> List[float]:
-        """
-        Call out to Bedrock embedding endpoint to get embeddings for a single text.
-
-        :param text: The text to embed.
-        :return: List of floats representing the embedding.
-        """
-        text = text.replace(os.linesep, " ")
-
-        provider = self.model_id.split(".")[0]
-        input_body = {}
-        input_body["inputText"] = text if provider == "amazon" else {"texts": [text], "input_type": "search_document"}
-
-        response = self.client.invoke_model(
-            body=json.dumps(input_body),
-            modelId=self.model_id,
-            accept="application/json",
-            contentType="application/json",
-        )
-
-        response_body = json.loads(response.get("body").read())
-        embedding = response_body.get("embedding") if provider == "amazon" else response_body.get("embeddings")[0]
-
-        return embedding
-
-    def _normalize_vector(self, embeddings: List[float]) -> List[float]:
-        """
-        Normalize the embedding to a unit vector.
-
-        :param embeddings: List of floats representing the embedding.
-        :return: Normalized embedding.
-        """
+    @staticmethod
+    def _normalize_vector(embeddings: List[float]) -> List[float]:
+        """Normalize the embedding to a unit vector."""
         emb = np.array(embeddings)
         norm_emb = emb / np.linalg.norm(emb)
         return norm_emb.tolist()
 
-    def create_embeddings_list(self, texts: List[str]) -> EmbeddingsResponse:
-        """
-        Creates embeddings for a list of texts.
+    def _embedding_func(self, text: str) -> List[float]:
+        """Call out to Bedrock embedding endpoint"""
+        try:
+            text = text.replace(os.linesep, " ")
 
-        :param texts: List of strings to generate embeddings.
-        :return: EmbeddingsResponse containing list of embeddings.
-        """
+            provider = self.model.split(".")[0]
+            if provider == "cohere":
+                input_body = {"texts": [text], "input_type": "search_document"}
+            else:
+                input_body = {"inputText": text}
+            body = json.dumps(input_body)
+            response = self.client.invoke_model(
+                body=body,
+                modelId=self.model,
+                accept="application/json",
+                contentType="application/json",
+            )
+
+            response_body = json.loads(response.get("body").read())
+            embedding = response_body.get('embeddings')[0] if provider == "cohere" else response_body.get("embedding")
+            return embedding
+        except Exception:
+            logger.error(f"Error raised by inference endpoint.")
+            raise
+
+    def create_embeddings_list(self, request: EmbeddingsRequest) -> EmbeddingsResponse:
+        """Create embeddings for the input text."""
+        inputs = []
+        for data in request.data:
+            inputs.append(data.content)
+
         embedding_items = []
-        for text in texts:
+        for text in inputs:
             embedding = self._embedding_func(text)
             if self.normalize:
                 embedding = self._normalize_vector(embedding)
-
-            embedding_items.append(EmbeddingItem(text=text, embedding=embedding))
+            embedding_items.append(EmbeddingItem(content=text, embedding=embedding))
 
         return EmbeddingsResponse(embeddings=embedding_items)
-
-    def create_embedding(self, text: str) -> EmbeddingsResponse:
-        """
-        Creates an embedding for a single text.
-
-        :param text: The text to embed.
-        :return: EmbeddingsResponse containing the embedding.
-        """
-        return self.create_embeddings_list([text])
-
-
-# Example usage
-if __name__ == "__main__":
-    embedding_service = EmbeddingService()
-    sample_texts = ["Natural Language Processing with AWS Bedrock", "Embedding models using Amazon services"]
-    embeddings = embedding_service.create_embeddings_list(sample_texts)
-    for item in embeddings.embeddings:
-        print(f"Text: {item.text}, Embedding: {item.embedding[:10]}...")  # Print first 10 dimensions for brevity
